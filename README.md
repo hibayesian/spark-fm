@@ -11,33 +11,34 @@ In order to meet users' demands, Spark-FM supports various of optimization metho
 # Examples
 ## Scala API
 ```scala
-    val spark = SparkSession
-        .builder()
-        .appName("FactorizationMachinesExample")
-        .master("local[*]")
-        .getOrCreate()
+val spark = SparkSession
+  .builder()
+  .appName("FactorizationMachinesExample")
+  .master("local[*]")
+  .getOrCreate()
     
-    val train = spark.read.format("libsvm").load("data/a9a.tr")
-    val test = spark.read.format("libsvm").load("data/a9a.te")
+val train = spark.read.format("libsvm").load("data/a9a.tr")
+val test = spark.read.format("libsvm").load("data/a9a.te")
     
-    val trainer = new FactorizationMachines()
-        .setAlgo(Algo.fromString("classification"))
-        .setSolver(Solver.fromString("sgd"))
-        .setDim((1, 1, 8))
-        .setRegParams((0, 0.1, 0.1))
-        .setInitStdev(0.1)
-        .setStepSize(0.1)
-        .setTol(0.1)
-        .setMaxIter(10)
-        .setThreshold(0.5)
-        .setMiniBatchFraction(0.5)
+val trainer = new FactorizationMachines()
+  .setAlgo(Algo.fromString("classification"))
+  .setSolver(Solver.fromString("sgd"))
+  .setDim((1, 1, 8))
+  .setRegParams((0, 0.1, 0.1))
+  .setInitStdev(0.1)
+  .setStepSize(0.1)
+  .setTol(0.1)
+  .setMaxIter(10)
+  .setThreshold(0.5)
+  .setMiniBatchFraction(0.5)
     
-    val model = trainer.fit(train)
-    val result = model.transform(test)
-    val predictionAndLabel = result.select("prediction", "label")
-    val evaluator = new MulticlassClassificationEvaluator().setMetricName("accuracy")
-    println("Accuracy: " + evaluator.evaluate(predictionAndLabel))
-    spark.stop()
+val model = trainer.fit(train)
+val result = model.transform(test)
+val predictionAndLabel = result.select("prediction", "label")
+val evaluator = new MulticlassClassificationEvaluator().setMetricName("accuracy")
+println("Accuracy: " + evaluator.evaluate(predictionAndLabel))
+
+spark.stop()
 ```
 
 # Requirements
