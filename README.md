@@ -5,7 +5,7 @@ Factorization Machines is a general predictor like SVMs but is also able to esti
 In order to meet users' demands, Spark-FM supports various of optimization methods to train the model as follows.
  + Mini-batch Stochastic Gradient Descent (MLlib)
  + L-BFGS (MLlib)
- + Parallel Stochastic Gradient Descent (spark-optim)
+ + Parallel Stochastic Gradient Descent ([spark-optim](https://github.com/hibayesian/spark-optim))
 
 
 # Examples

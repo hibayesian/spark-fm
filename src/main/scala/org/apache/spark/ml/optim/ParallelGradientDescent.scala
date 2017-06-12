@@ -33,6 +33,7 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
   private var regParam: Double = 0.0
   private var convergenceTol: Double = 0.001
   private var aggregationDepth: Int = 2
+  private var numPartitions: Int = -1
 
   /**
     * Set the initial step size of parallel SGD for the first step. Default 1.0.
@@ -86,6 +87,15 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
   }
 
   /**
+    * Set the number of partitions for parallel SGD.
+    */
+  def setNumPartitions(numPartitions: Int): this.type = {
+    require(numPartitions > 0, s"Number of partitions must be positive")
+    this.numPartitions = numPartitions
+    this
+  }
+
+  /**
     * Set the aggregation depth. Default 2.
     * If the dimensions of features or the number of partitions are large,
     * this param could be adjusted to a larger size.
@@ -126,22 +136,24 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
       regParam,
       initialWeights,
       convergenceTol,
-      aggregationDepth)
+      aggregationDepth,
+      numPartitions)
     weights
   }
 }
 
 object ParallelGradientDescent extends Logging {
   def runParallelSGD(
-      data: RDD[(Double, Vector)],
-      gradient: Gradient,
-      updater: Updater,
-      stepSize: Double,
-      numIterations: Int,
-      regParam: Double,
-      initialWeights: Vector,
-      convergenceTol: Double,
-      aggregationDepth: Int): (Vector, Array[Double]) = {
+                      data: RDD[(Double, Vector)],
+                      gradient: Gradient,
+                      updater: Updater,
+                      stepSize: Double,
+                      numIterations: Int,
+                      regParam: Double,
+                      initialWeights: Vector,
+                      convergenceTol: Double,
+                      aggregationDepth: Int,
+                      numPartitions: Int): (Vector, Array[Double]) = {
 
     val stochasticLossHistory = new ArrayBuffer[Double](numIterations)
     // Record previous weight and current one to calculate solution vector difference
@@ -160,26 +172,29 @@ object ParallelGradientDescent extends Logging {
     // Initialize weights as a column vector
     var weights = Vectors.dense(initialWeights.toArray)
 
+    val numParts = if (numPartitions > 0) numPartitions else data.getNumPartitions
+
     var converged = false // indicates whether converged based on convergenceTol
     var i = 1
     while (!converged && i <= numIterations) {
       val bcWeights = data.context.broadcast(weights)
-      val (avgWeights, avgRegVal, lossSum, batchSize) = data.mapPartitions { part =>
-        var localWeights = bcWeights.value
-        var localRegVal = 0.0
-        var localLossSum = 0.0
-        var j = 1
-        while (part.hasNext) {
-          val (label, vector) = part.next()
-          val (localGrad, localLoss) = gradient.compute(vector, label, localWeights)
-          val update = updater.compute(localWeights, localGrad, stepSize, j, regParam)
-          localWeights = update._1
-          localRegVal = update._2
-          localLossSum += localLoss
-          j += 1
-        }
-        Iterator.single((localWeights, localRegVal, localLossSum, j))
-      }.treeReduce ({ case ((w1, rv1, ls1, c1), (w2, rv2, ls2, c2)) =>
+      val (avgWeights, avgRegVal, lossSum, batchSize) = data.repartition(numParts)
+        .mapPartitions { part =>
+          var localWeights = bcWeights.value
+          var localRegVal = 0.0
+          var localLossSum = 0.0
+          var j = 1
+          while (part.hasNext) {
+            val (label, vector) = part.next()
+            val (localGrad, localLoss) = gradient.compute(vector, label, localWeights)
+            val update = updater.compute(localWeights, localGrad, stepSize, j, regParam)
+            localWeights = update._1
+            localRegVal = update._2
+            localLossSum += localLoss
+            j += 1
+          }
+          Iterator.single((localWeights, localRegVal, localLossSum, j))
+        }.treeReduce ({ case ((w1, rv1, ls1, c1), (w2, rv2, ls2, c2)) =>
         val avgWeights =
           (w1.asBreeze * c1.toDouble + w2.asBreeze * c2.toDouble) / (c1 + c2).toDouble
         val avgRegVal = (rv1 * c1.toDouble + rv2 * c2.toDouble) / (c1 + c2).toDouble
@@ -201,9 +216,9 @@ object ParallelGradientDescent extends Logging {
   }
 
   private def isConverged(
-      previousWeights: Vector,
-      currentWeights: Vector,
-      convergenceTol: Double): Boolean = {
+                           previousWeights: Vector,
+                           currentWeights: Vector,
+                           convergenceTol: Double): Boolean = {
     // To compare with convergence tolerance.
     val previousBDV = previousWeights.asBreeze.toDenseVector
     val currentBDV = currentWeights.asBreeze.toDenseVector
