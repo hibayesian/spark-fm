@@ -87,15 +87,6 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
   }
 
   /**
-    * Set the number of partitions for parallel SGD.
-    */
-  def setNumPartitions(numPartitions: Int): this.type = {
-    require(numPartitions > 0, s"Number of partitions must be positive")
-    this.numPartitions = numPartitions
-    this
-  }
-
-  /**
     * Set the aggregation depth. Default 2.
     * If the dimensions of features or the number of partitions are large,
     * this param could be adjusted to a larger size.
@@ -103,6 +94,15 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
   def setAggregationDepth(aggregationDepth: Int): this.type = {
     require(aggregationDepth > 0, s"Aggregation depth must be positive but got $aggregationDepth")
     this.aggregationDepth = aggregationDepth
+    this
+  }
+
+  /**
+    * Set the number of partitions for parallel SGD.
+    */
+  def setNumPartitions(numPartitions: Int): this.type = {
+    require(numPartitions > 0, s"Number of partitions must be positive")
+    this.numPartitions = numPartitions
     this
   }
 
@@ -144,16 +144,16 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
 
 object ParallelGradientDescent extends Logging {
   def runParallelSGD(
-                      data: RDD[(Double, Vector)],
-                      gradient: Gradient,
-                      updater: Updater,
-                      stepSize: Double,
-                      numIterations: Int,
-                      regParam: Double,
-                      initialWeights: Vector,
-                      convergenceTol: Double,
-                      aggregationDepth: Int,
-                      numPartitions: Int): (Vector, Array[Double]) = {
+      data: RDD[(Double, Vector)],
+      gradient: Gradient,
+      updater: Updater,
+      stepSize: Double,
+      numIterations: Int,
+      regParam: Double,
+      initialWeights: Vector,
+      convergenceTol: Double,
+      aggregationDepth: Int,
+      numPartitions: Int): (Vector, Array[Double]) = {
 
     val stochasticLossHistory = new ArrayBuffer[Double](numIterations)
     // Record previous weight and current one to calculate solution vector difference
@@ -216,9 +216,9 @@ object ParallelGradientDescent extends Logging {
   }
 
   private def isConverged(
-                           previousWeights: Vector,
-                           currentWeights: Vector,
-                           convergenceTol: Double): Boolean = {
+      previousWeights: Vector,
+      currentWeights: Vector,
+      convergenceTol: Double): Boolean = {
     // To compare with convergence tolerance.
     val previousBDV = previousWeights.asBreeze.toDenseVector
     val currentBDV = currentWeights.asBreeze.toDenseVector
