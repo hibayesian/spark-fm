@@ -144,12 +144,12 @@ class FactorizationMachines(override val uid: String)
 
   /**
     * Sets the value of param [[solver]].
-    * Default is Solver.ParallelGradientDescent.
+    * Default is Solver.GradientDescent.
     *
     * @group setParam
     */
   def setSolver(value: Solver): this.type = set(solver, value)
-  setDefault(solver, Solver.ParallelGradientDescent)
+  setDefault(solver, Solver.GradientDescent)
 
   /**
     * Sets the value of param [[dim]].
