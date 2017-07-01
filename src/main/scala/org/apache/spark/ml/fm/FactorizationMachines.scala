@@ -18,6 +18,7 @@
 package org.apache.spark.ml.fm
 
 import breeze.linalg.{DenseVector => BDV, Vector => BV, axpy => brzAxpy}
+import breeze.numerics.abs
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.optim.configuration.Algo.Algo
 import org.apache.spark.ml.optim.configuration.Solver.Solver
@@ -643,7 +644,7 @@ class FactorizationMachinesPerCoordinateUpdater(
     // update zArray and nArray
     val gradBias = gradient(gradient.size - 1)
     val sigmaBias = (math.sqrt(nArray(nArray.length - 1) + gradBias * gradBias) -
-      math.sqrt(nArray(nArray.length - 1))) / alphaV
+      math.sqrt(nArray(nArray.length - 1))) / alphaW
     zArray(zArray.length - 1) += gradBias - sigmaBias * 1.0
     nArray(nArray.length - 1) += gradBias * gradBias
 
@@ -669,7 +670,7 @@ class FactorizationMachinesPerCoordinateUpdater(
       0.0
     } else {
       -(zArray(zArray.length - 1) - regParamsL1._1 * math.signum(zArray(zArray.length - 1))) /
-        (regParamsL2._1 + (betaV + math.sqrt(nArray(nArray.length - 1))) / alphaV)
+        (regParamsL2._1 + (betaW + math.sqrt(nArray(nArray.length - 1))) / alphaW)
     }
 
     activeIndices.foreach { index =>
@@ -693,7 +694,13 @@ class FactorizationMachinesPerCoordinateUpdater(
       }
     }
 
-    (MLlibVectors.dense(weightsNew), 0.0, MLlibVectors.dense(nArray), MLlibVectors.dense(zArray))
+    val brzRegParamsL1 = BDV.vertcat(BDV.fill(numFeatures * dim._3){regParamsL1._3},
+      BDV.fill(numFeatures){regParamsL1._2}, BDV.fill(1){regParamsL1._1})
+    val brzRegParamsL2 = BDV.vertcat(BDV.fill(numFeatures * dim._3){regParamsL2._3},
+      BDV.fill(numFeatures){regParamsL2._2}, BDV.fill(1){regParamsL2._1})
+    val brzWeights: BV[Double] = MLlibVectors.dense(weightsNew).asBreeze.toDenseVector
+    val regVal = (brzRegParamsL1 dot abs(brzWeights)) + (brzRegParamsL2 dot (brzWeights :* brzWeights))
+    (MLlibVectors.dense(weightsNew), regVal, MLlibVectors.dense(nArray), MLlibVectors.dense(zArray))
   }
 }
 
