@@ -649,35 +649,47 @@ class FactorizationMachinesPerCoordinateUpdater(
 
     activeIndices.foreach { index =>
       val gradW = gradient(locW + index)
-      val sigmaW = (math.sqrt(nArray(locW + index) + gradW * gradW)  - math.sqrt(nArray(locW + index))) / alphaV
+      val sigmaW = (math.sqrt(nArray(locW + index) + gradW * gradW)  - math.sqrt(nArray(locW + index))) / alphaW
       zArray(locW + index) += gradW - sigmaW * weightsNew(locW + index)
       nArray(locW + index) += gradW * gradW
     }
 
     activeIndices.foreach { index =>
       val locV = index * dim._3
-      for (f <- 0 until dim._3) {
-        val gradV = gradient(locV + f)
-        val sigmaV = 1 / alphaV * (math.sqrt(nArray(locV + f) + gradV * gradV)  - math.sqrt(nArray(locV + f)))
-        zArray(locV + f) += gradV - sigmaV * weightsNew(locV + f)
-        nArray(locV + f) += gradV * gradV
+      for (i <- 0 until dim._3) {
+        val gradV = gradient(locV + i)
+        val sigmaV = (math.sqrt(nArray(locV + i) + gradV * gradV)  - math.sqrt(nArray(locV + i))) / alphaV
+        zArray(locV + i) += gradV - sigmaV * weightsNew(locV + i)
+        nArray(locV + i) += gradV * gradV
       }
     }
 
     // update bias unit, w and v
-    weightsNew(weightsNew.length - 1) = if (math.abs(zArray(zArray.length - 1)) < lambda1) {
+    weightsNew(weightsNew.length - 1) = if (math.abs(zArray(zArray.length - 1)) < regParamsL1._1) {
       0.0
     } else {
-      -(zArray(zArray.length - 1) - lambda1 * math.signum(zArray(zArray.length - 1))) /
-        (lambda2 + (betaV + math.sqrt(nArray(nArray.length - 1))) / alphaV)
+      -(zArray(zArray.length - 1) - regParamsL1._1 * math.signum(zArray(zArray.length - 1))) /
+        (regParamsL2._1 + (betaV + math.sqrt(nArray(nArray.length - 1))) / alphaV)
     }
 
     activeIndices.foreach { index =>
-      weightsNew(locW + index) = if (math.abs(zArray(locW + index)) < lambda1) {
+      weightsNew(locW + index) = if (math.abs(zArray(locW + index)) < regParamsL1._2) {
         0.0
       } else {
-        -(zArray(locW + index) - lambda1 * math.signum(zArray(locW + index))) /
-          (lambda2 + (betaW + math.sqrt(nArray(locW + index))) / alphaW)
+        -(zArray(locW + index) - regParamsL1._2 * math.signum(zArray(locW + index))) /
+          (regParamsL2._2 + (betaW + math.sqrt(nArray(locW + index))) / alphaW)
+      }
+    }
+
+    activeIndices.foreach { index =>
+      val locV = index * dim._3
+      for (i <- 0 until dim._3) {
+          weightsNew(locV + i) = if (math.abs(zArray(locV + i)) < regParamsL1._3) {
+            0.0
+          } else {
+            -(zArray(locV + i) - regParamsL1._3 * math.signum(zArray(locV + i))) /
+              (regParamsL2._3 + (betaV + math.sqrt(nArray(locV + i))) / alphaV)
+          }
       }
     }
 
