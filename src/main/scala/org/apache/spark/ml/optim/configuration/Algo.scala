@@ -22,10 +22,11 @@ package org.apache.spark.ml.optim.configuration
  */
 object Algo extends Enumeration {
   type Algo = Value
-  val Classification, Regression = Value
+  val BinaryClassification, MultinomialClassification, Regression = Value
 
   private[ml] def fromString(name: String): Algo = name match {
-    case "classification" | "Classification" => Classification
+    case "binary classification" | "Binary Classification" => BinaryClassification
+    case "multinomial classification" | "Multinomial Classification" => MultinomialClassification
     case "regression" | "Regression" => Regression
     case _ => throw new IllegalArgumentException(s"Did not recognize Algo name: $name")
   }

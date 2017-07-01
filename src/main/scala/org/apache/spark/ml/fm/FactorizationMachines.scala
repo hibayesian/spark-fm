@@ -19,12 +19,12 @@ package org.apache.spark.ml.fm
 
 import breeze.linalg.{DenseVector => BDV, Vector => BV, axpy => brzAxpy}
 import org.apache.spark.ml.linalg.{Vector, Vectors}
-import org.apache.spark.ml.optim.ParallelGradientDescent
 import org.apache.spark.ml.optim.configuration.Algo.Algo
 import org.apache.spark.ml.optim.configuration.Solver.Solver
 import org.apache.spark.ml.optim.configuration.{Algo, Solver}
+import org.apache.spark.ml.optim.{ParallelFtrl, ParallelGradientDescent, PerCoordinateUpdater}
+import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
-import org.apache.spark.ml.param.{DoubleParam, Param, ParamMap, ParamValidators}
 import org.apache.spark.ml.util.{DefaultParamsWritable, Identifiable}
 import org.apache.spark.ml.{PredictionModel, Predictor, PredictorParams}
 import org.apache.spark.mllib.linalg.VectorImplicits._
@@ -45,13 +45,13 @@ private[ml] trait FactorizationMachinesParams extends PredictorParams with HasSt
   /**
     * The learning goal of factorization machines.
     * Supported:
-    *   Algo.Classification(only supports binary classification now),
+    *   Algo.BinaryClassification,
     *   Algo.Regression
     *
     * @group param
     */
   final val algo: Param[Algo] = new Param[Algo](this, "algo", "The learning goal of factorization machines",
-    ParamValidators.inArray(Array(Algo.Regression, Algo.Classification)))
+    ParamValidators.inArray(Array(Algo.Regression, Algo.BinaryClassification)))
 
   /** @group getParam */
   final def getAlgo: Algo = $(algo)
@@ -62,11 +62,16 @@ private[ml] trait FactorizationMachinesParams extends PredictorParams with HasSt
     *   Solver.GradientDescent,
     *   Solver.ParallelGradientDescent,
     *   Solver.LBFGS
+    *   Solver.ParallelFtrl
     *
     * @group param
     */
   final val solver: Param[Solver] = new Param[Solver](this, "solver", "The learning method of factorization machines",
-    ParamValidators.inArray(Array(Solver.GradientDescent, Solver.ParallelGradientDescent, Solver.LBFGS)))
+    ParamValidators.inArray(Array(
+      Solver.GradientDescent,
+      Solver.ParallelGradientDescent,
+      Solver.LBFGS,
+      Solver.ParallelFtrl)))
 
   /** @group getParam */
   final def getSolver: Solver = $(solver)
@@ -83,15 +88,31 @@ private[ml] trait FactorizationMachinesParams extends PredictorParams with HasSt
   final def getDim: (Int, Int, Int) = $(dim)
 
   /**
-    * r0 = bias regularization, r1 = 1-way regularization, r2 = 2-way regularization.
+    * r0 = L1 regularization parameter of bias, r1 = L1 regularization parameter of 1-way interactions,
+    * r2 = L1 regularization parameter of 2-way interactions.
+    *
+    * Note:
+    * L1 regularization parameter can only be set in Solver.ParallelFtrl.
     *
     * @group param
     */
-  final val regParams: Param[(Double, Double, Double)] = new Param[(Double, Double, Double)](this, "regParams",
+  final val regParamsL1: Param[(Double, Double, Double)] = new Param[(Double, Double, Double)](this, "regParamsL1",
     "(r0, r1, r2)")
 
   /** @group getParam */
-  final def getRegParams: (Double, Double, Double) = $(regParams)
+  final def getRegParamsL1: (Double, Double, Double) = $(regParamsL1)
+
+  /**
+    * r0 = L2 regularization parameter of bias, r1 = L2 regularization parameter of 1-way interactions,
+    * r2 = L2 regularization parameter of 2-way interactions.
+    *
+    * @group param
+    */
+  final val regParamsL2: Param[(Double, Double, Double)] = new Param[(Double, Double, Double)](this, "regParamsL2",
+    "(r0, r1, r2)")
+
+  /** @group getParam */
+  final def getRegParamsL2: (Double, Double, Double) = $(regParamsL2)
 
   /**
     * stdev for initialization of 2-way factors.
@@ -104,7 +125,7 @@ private[ml] trait FactorizationMachinesParams extends PredictorParams with HasSt
   final def getInitStdev: Double = $(initStdev)
 
   /**
-    * Fraction of data to be used per iteration.
+    * Fraction of data to be used per iteration in Solver.GradientDescent.
     *
     * @group param
     */
@@ -113,6 +134,39 @@ private[ml] trait FactorizationMachinesParams extends PredictorParams with HasSt
 
   /** @group getParam */
   final def getMiniBatchFraction: Double = $(miniBatchFraction)
+
+  /**
+    * Number of partitions to be used for optimization.
+    *
+    * @group param
+    */
+  final val numPartitions: IntParam = new IntParam(this, "numPartitions",
+    "Number of partitions to be used for optimization", (n: Int) => n > 0 || n == -1)
+
+  /** @group getParam */
+  final def getNumPartitions: Int = $(numPartitions)
+
+  /**
+    * alphaW = hyper parameter alpha of learning rate for w,
+    * alphaV = hyper parameter alpha of learning rate for v.
+    *
+    * @group param
+    */
+  final val alpha: Param[(Double, Double)] = new Param[(Double, Double)](this, "alpha", "(alphaW, alphaV)")
+
+  /** @group getParam */
+  final def getAlpha: (Double, Double) = $(alpha)
+
+  /**
+    * betaW = hyper parameter beta of learning rate for w.
+    * betaV = Hyper parameter beta of learning rate for v.
+    *
+    * @group param
+    */
+  final val beta: Param[(Double, Double)] = new Param[(Double, Double)](this, "beta", "(betaW, betaV)")
+
+  /** @group getParam */
+  final def getBeta: (Double, Double) = $(beta)
 
   override protected def validateAndTransformSchema(
       schema: StructType,
@@ -161,13 +215,24 @@ class FactorizationMachines(override val uid: String)
   setDefault(dim, (1, 1, 8))
 
   /**
-    * Sets the value of param [[regParams]].
-    * Default is (0, 1e-3, 1e-4).
+    * Sets the value of param [[regParamsL1]].
+    * Default is (0.1, 0.1, 0.1).
     *
     * @group setParam
     */
-  def setRegParams(value: (Double, Double, Double)): this.type = set(regParams, value)
-  setDefault(regParams, (0.0, 1e-3, 1e-4))
+  def setReParamsL1(value: (Double, Double, Double)): this.type = {
+    require($(solver) == Solver.ParallelFtrl,
+      s"Param regParamsL1 can only be set in Solver.ParallelFtrl.")
+    set(regParamsL1, value)
+  }
+  setDefault(regParamsL1, (0.1, 0.1, 0.1))
+
+  /**
+    * Sets the value of param [[regParamsL2]].
+    *
+    * @group setParam
+    */
+  def setRegParamsL2(value: (Double, Double, Double)): this.type = set(regParamsL2, value)
 
   /**
     * Sets the value of param [[initStdev]].
@@ -224,7 +289,7 @@ class FactorizationMachines(override val uid: String)
     */
   def setAggregationDepth(value: Int): this.type = {
     require($(solver) == Solver.ParallelGradientDescent,
-      s"Param aggregationDepth only works in Solver.ParallelGradientDescent.")
+      s"Param aggregationDepth can only be set in Solver.ParallelGradientDescent.")
     set(aggregationDepth, value)
   }
 
@@ -236,10 +301,47 @@ class FactorizationMachines(override val uid: String)
     */
   def setMiniBatchFraction(value: Double): this.type = {
     require($(solver) == Solver.GradientDescent,
-      s"Param miniBatchFraction only works in Solver.GradientDescent.")
+      s"Param miniBatchFraction can only be set in Solver.GradientDescent.")
     set(miniBatchFraction, value)
   }
   setDefault(miniBatchFraction, 1.0)
+
+  /**
+    * Set the value of param[[numPartitions]]
+    * Default is -1.
+    *
+    * @group setParam
+    */
+  def setNumPartitions(value: Int): this.type = {
+    set(numPartitions, value)
+  }
+  setDefault(numPartitions, -1)
+
+  /**
+    * Set the value of param[[alpha]]
+    * Default is (0.1, 0.1).
+    *
+    * @group setParam
+    */
+  def setAlpha(value: (Double, Double)): this.type = {
+    require($(solver) == Solver.ParallelFtrl,
+      s"Hyper parameter alpha can only be set in Solver.ParallelFtrl.")
+    set(alpha, value)
+  }
+  setDefault(alpha, (0.1, 0.1))
+
+  /**
+    * Set the value of param[[beta]]
+    * Default is (1.0, 1.0).
+    *
+    * @group setParam
+    */
+  def setBeta(value: (Double, Double)): this.type = {
+    require($(solver) == Solver.ParallelFtrl,
+      s"Hyper parameter beta can only be set in Solver.ParallelFtrl.")
+    set(beta, value)
+  }
+  setDefault(beta, (1.0, 1.0))
 
   private var optInitialModel: Option[FactorizationMachinesModel] = None
 
@@ -285,11 +387,20 @@ class FactorizationMachines(override val uid: String)
       case None => initWeights(numFeatures)
     }
 
-    val reg = ($(dim)._1, $(dim)._2) match {
-      case (1, 1) => $(regParams)
-      case (1, 0) => ($(regParams)._1, 0.0, $(regParams)._3)
-      case (0, 1) => (0.0, $(regParams)._2, $(regParams)._3)
-      case (0, 0) => (0.0, 0.0, $(regParams)._3)
+    val regL1 = ($(dim)._1, $(dim)._2) match {
+      case (1, 1) => $(regParamsL1)
+      case (1, 0) => ($(regParamsL1)._1, 0.0, $(regParamsL1)._3)
+      case (0, 1) => (0.0, $(regParamsL1)._2, $(regParamsL1)._3)
+      case (0, 0) => (0.0, 0.0, $(regParamsL1)._3)
+      case _ => throw new IllegalArgumentException("Invalid value of parameter 'dim'(k0, k1, k2)." +
+        "Try to set k0, k1 to 0 or 1.")
+    }
+
+    val regL2 = ($(dim)._1, $(dim)._2) match {
+      case (1, 1) => $(regParamsL2)
+      case (1, 0) => ($(regParamsL2)._1, 0.0, $(regParamsL2)._3)
+      case (0, 1) => (0.0, $(regParamsL2)._2, $(regParamsL2)._3)
+      case (0, 0) => (0.0, 0.0, $(regParamsL2)._3)
       case _ => throw new IllegalArgumentException("Invalid value of parameter 'dim'(k0, k1, k2)." +
         "Try to set k0, k1 to 0 or 1.")
     }
@@ -299,30 +410,39 @@ class FactorizationMachines(override val uid: String)
         data.map(_._1).aggregate[(Double, Double)]((Double.MaxValue, Double.MinValue))({ case ((min, max), v) =>
         (Math.min(min, v), Math.max(max, v))}, { case ((min1, max1), (min2, max2)) =>
         (Math.min(min1, min2), Math.max(max1, max2))})
-      case Algo.Classification => (0.0, 0.0)
+      case Algo.BinaryClassification => (0.0, 0.0)
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $algo now")
     }
 
     val gradient = new FactorizationMachinesGradient($(algo), $(dim), numFeatures, maxTarget, minTarget)
-    val updater = new FactorizationMachinesUpdater($(dim), reg, numFeatures)
-
     val optimizer = $(solver) match {
       case Solver.GradientDescent =>
+        val updater = new FactorizationMachinesUpdater($(dim), regL2, numFeatures)
         new GradientDescent(gradient, updater)
           .setNumIterations($(maxIter))
           .setStepSize($(stepSize))
           .setConvergenceTol($(tol))
           .setMiniBatchFraction($(miniBatchFraction))
       case Solver.ParallelGradientDescent =>
+        val updater = new FactorizationMachinesUpdater($(dim), regL2, numFeatures)
         new ParallelGradientDescent(gradient, updater)
           .setNumIterations($(maxIter))
           .setStepSize($(stepSize))
           .setConvergenceTol($(tol))
           .setAggregationDepth($(aggregationDepth))
+          .setNumPartitions($(numPartitions))
       case Solver.LBFGS =>
+        val updater = new FactorizationMachinesUpdater($(dim), regL2, numFeatures)
         new LBFGS(gradient, updater)
           .setNumIterations($(maxIter))
           .setConvergenceTol($(tol))
+      case Solver.ParallelFtrl =>
+        val updater = new FactorizationMachinesPerCoordinateUpdater($(dim), regL1, regL2, numFeatures, $(alpha), $(beta))
+        new ParallelFtrl(gradient, updater)
+          .setNumIterations($(maxIter))
+          .setConvergenceTol($(tol))
+          .setAggregationDepth($(aggregationDepth))
+          .setNumPartitions($(numPartitions))
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $solver now.")
     }
 
@@ -331,7 +451,7 @@ class FactorizationMachines(override val uid: String)
       data.unpersist()
     }
 
-    FactorizationMachinesModel(uid, $(algo), newWeights, $(dim), $(regParams), $(threshold), numFeatures)
+    FactorizationMachinesModel(uid, $(algo), newWeights, $(dim), $(threshold), numFeatures)
   }
 }
 
@@ -340,7 +460,6 @@ class FactorizationMachinesModel private[ml](
     val algo: Algo,
     val weights: Vector,
     val dim: (Int, Int, Int),
-    val regParams: (Double, Double, Double),
     val threshold: Double,
     override val numFeatures: Int)
     extends PredictionModel[Vector, FactorizationMachinesModel] with Serializable {
@@ -350,7 +469,7 @@ class FactorizationMachinesModel private[ml](
       features, weights, dim, numFeatures)
     algo match {
       case Algo.Regression => p
-      case Algo.Classification =>
+      case Algo.BinaryClassification =>
         val out = 1.0 / (1.0 + Math.exp(-p))
         if (out >= threshold) { 1.0 } else { -1.0 }
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $algo now")
@@ -359,7 +478,7 @@ class FactorizationMachinesModel private[ml](
 
   override def copy(extra: ParamMap): FactorizationMachinesModel = {
     copyValues(new FactorizationMachinesModel(
-      uid, algo, weights, dim, regParams, threshold, numFeatures), extra)
+      uid, algo, weights, dim, threshold, numFeatures), extra)
   }
 }
 
@@ -369,10 +488,9 @@ object FactorizationMachinesModel {
       algo: Algo,
       weights: Vector,
       dim: (Int, Int, Int),
-      regParams: (Double, Double, Double),
       threshold: Double,
       numFeatures: Int): FactorizationMachinesModel = {
-    new FactorizationMachinesModel(uid, algo, weights, dim, regParams, threshold, numFeatures)
+    new FactorizationMachinesModel(uid, algo, weights, dim, threshold, numFeatures)
   }
 
   def predictAndSum(
@@ -413,24 +531,24 @@ class FactorizationMachinesGradient(
     val minTarget: Double = 0.0) extends Gradient {
 
   override def compute(
-      data: MLlibVector,
+      features: MLlibVector,
       label: Double,
       weights: MLlibVector): (MLlibVector, Double) = {
     val cumGradient = Vectors.dense(Array.fill(weights.size)(0.0))
-    val loss = compute(data, label, weights, cumGradient)
+    val loss = compute(features, label, weights, cumGradient)
     (cumGradient, loss)
   }
 
   override def compute(
-      data: MLlibVector,
+      features: MLlibVector,
       label: Double,
       weights: MLlibVector,
       cumGradient: MLlibVector): Double = {
 
-    val (p, sum) = FactorizationMachinesModel.predictAndSum(data, weights, dim, numFeatures)
+    val (p, sum) = FactorizationMachinesModel.predictAndSum(features, weights, dim, numFeatures)
     val mult = algo match {
       case Algo.Regression => Math.min(Math.max(p, minTarget), maxTarget) - label
-      case Algo.Classification => label * (1.0 / (1.0 + Math.exp(-p * label)) - 1.0)
+      case Algo.BinaryClassification => label * (1.0 / (1.0 + Math.exp(-p * label)) - 1.0)
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $algo now")
     }
 
@@ -444,12 +562,12 @@ class FactorizationMachinesGradient(
 
         if (dim._2 == 1) {
           val startIndex = numFeatures * dim._3
-          data.foreachActive { case (index: Int, value: Double) =>
+          features.foreachActive { case (index: Int, value: Double) =>
             cumValues(startIndex + index) += value * mult
           }
         }
 
-        data.foreachActive { case (index: Int, value: Double) =>
+        features.foreachActive { case (index: Int, value: Double) =>
             val startIndex = index * dim._3
             for (f <- 0 until dim._3) {
               cumValues(startIndex + f) += (sum(f) * value - weights(startIndex + f) * value * value) * mult
@@ -463,7 +581,7 @@ class FactorizationMachinesGradient(
 
     algo match {
       case Algo.Regression => (p - label) * (p - label)
-      case Algo.Classification => -Math.log(1 + 1 / (1 + Math.exp(-p * label)))
+      case Algo.BinaryClassification => -Math.log(1 + 1 / (1 + Math.exp(-p * label)))
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $algo now")
     }
   }
@@ -497,3 +615,73 @@ class FactorizationMachinesUpdater(
     (Vectors.fromBreeze(brzWeights), regVal)
   }
 }
+
+class FactorizationMachinesPerCoordinateUpdater(
+    dim: (Int, Int, Int),
+    regParamsL1: (Double, Double, Double),
+    regParamsL2: (Double, Double, Double),
+    numFeatures: Int,
+    alphaWV: (Double, Double),
+    betaWV: (Double, Double)) extends PerCoordinateUpdater {
+  override def compute(
+      activeIndices: Array[Int],
+      weightsOld: MLlibVector,
+      gradient: MLlibVector,
+      alpha: Double,
+      beta: Double,
+      lambda1: Double,
+      lambda2: Double,
+      n: MLlibVector,
+      z: MLlibVector): (MLlibVector, Double, MLlibVector, MLlibVector) = {
+    val (alphaW, alphaV) = (alphaWV._1, alphaWV._2)
+    val (betaW, betaV) = (betaWV._1, betaWV._2)
+    val weightsNew = weightsOld.toArray
+    val nArray = n.toDense.values
+    val zArray = z.toDense.values
+    val locW = numFeatures * dim._3
+
+    // update zArray and nArray
+    val gradBias = gradient(gradient.size - 1)
+    val sigmaBias = (math.sqrt(nArray(nArray.length - 1) + gradBias * gradBias) -
+      math.sqrt(nArray(nArray.length - 1))) / alphaV
+    zArray(zArray.length - 1) += gradBias - sigmaBias * 1.0
+    nArray(nArray.length - 1) += gradBias * gradBias
+
+    activeIndices.foreach { index =>
+      val gradW = gradient(locW + index)
+      val sigmaW = (math.sqrt(nArray(locW + index) + gradW * gradW)  - math.sqrt(nArray(locW + index))) / alphaV
+      zArray(locW + index) += gradW - sigmaW * weightsNew(locW + index)
+      nArray(locW + index) += gradW * gradW
+    }
+
+    activeIndices.foreach { index =>
+      val locV = index * dim._3
+      for (f <- 0 until dim._3) {
+        val gradV = gradient(locV + f)
+        val sigmaV = 1 / alphaV * (math.sqrt(nArray(locV + f) + gradV * gradV)  - math.sqrt(nArray(locV + f)))
+        zArray(locV + f) += gradV - sigmaV * weightsNew(locV + f)
+        nArray(locV + f) += gradV * gradV
+      }
+    }
+
+    // update bias unit, w and v
+    weightsNew(weightsNew.length - 1) = if (math.abs(zArray(zArray.length - 1)) < lambda1) {
+      0.0
+    } else {
+      -(zArray(zArray.length - 1) - lambda1 * math.signum(zArray(zArray.length - 1))) /
+        (lambda2 + (betaV + math.sqrt(nArray(nArray.length - 1))) / alphaV)
+    }
+
+    activeIndices.foreach { index =>
+      weightsNew(locW + index) = if (math.abs(zArray(locW + index)) < lambda1) {
+        0.0
+      } else {
+        -(zArray(locW + index) - lambda1 * math.signum(zArray(locW + index))) /
+          (lambda2 + (betaW + math.sqrt(nArray(locW + index))) / alphaW)
+      }
+    }
+
+    (MLlibVectors.dense(weightsNew), 0.0, MLlibVectors.dense(nArray), MLlibVectors.dense(zArray))
+  }
+}
+

@@ -15,24 +15,25 @@
  * limitations under the License.
  */
 
-package org.apache.spark.ml.optim.configuration
+
+package org.apache.spark.ml.optim
+
+import org.apache.spark.mllib.linalg.Vector
 
 /**
-  * Enum to select the solver
+  * :: DeveloperApi ::
+  * Class used to perform steps (weight update) with per-coordinate learning rate.
+  *
   */
-object Solver extends Enumeration {
-  type Solver = Value
-
-  val GradientDescent,
-      ParallelGradientDescent,
-      LBFGS,
-      ParallelFtrl = Value
-
-  private[ml] def fromString(name: String): Solver = name match {
-    case "sgd" | "SGD" => GradientDescent
-    case "psgd" | "PSGD" => ParallelGradientDescent
-    case "lbfgs" | "LBFGS" => LBFGS
-    case "pftrl" | "PFTRL" => ParallelFtrl
-    case _ => throw new IllegalArgumentException(s"Did not recognize Solver name: $name")
-  }
+abstract class PerCoordinateUpdater extends Serializable {
+  def compute(
+      activeIndices: Array[Int],
+      weightsOld: Vector,
+      gradient: Vector,
+      alpha: Double,
+      beta: Double,
+      l1: Double,
+      l2: Double,
+      n: Vector,
+      z: Vector): (Vector, Double, Vector, Vector)
 }

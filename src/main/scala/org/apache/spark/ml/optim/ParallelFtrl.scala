@@ -20,49 +20,77 @@ package org.apache.spark.ml.optim
 import breeze.linalg.norm
 import org.apache.spark.internal.Logging
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
-import org.apache.spark.mllib.optimization.{Gradient, Optimizer, Updater}
+import org.apache.spark.mllib.optimization.{Gradient, Optimizer}
 import org.apache.spark.rdd.RDD
 
 import scala.collection.mutable.ArrayBuffer
 
-class ParallelGradientDescent private[spark](private var gradient: Gradient, private var updater: Updater)
+/**
+  * :: DeveloperApi ::
+  * Class used to solve an online optimization problem using Follow-the-regularized-leader.
+  * It can give a good performance vs. sparsity trade-off.
+  *
+  * Reference: [Ad Click Prediction: a View from the Trenches](https://www.eecs.tufts.
+  * edu/~dsculley/papers/ad-click-prediction.pdf)
+  *
+  * @param gradient Gradient function to be used.
+  * @param updater Updater to be used to update weights after every iteration.
+  */
+class ParallelFtrl private[spark](private var gradient: Gradient, private var updater: PerCoordinateUpdater)
   extends Optimizer with Logging {
 
-  private var stepSize: Double = 1.0
-  private var numIterations: Int = 100
-  private var regParam: Double = 0.0
+  private var alpha: Double = 0.01
+  private var beta: Double = 1.0
+  private var lambda1: Double = 0.1
+  private var lambda2: Double = 1.0
+  private var numIterations: Int = 1
   private var convergenceTol: Double = 0.001
   private var aggregationDepth: Int = 2
   private var numPartitions: Int = -1
 
   /**
-    * Set the initial step size of parallel SGD for the first step. Default 1.0.
-    * In subsequent steps, the step size will decrease with stepSize/sqrt(t)
+    * Set the hyper parameter alpha of learning rate.
+    * According to the reference, the optimal value of alpha can vary a fair bit depending on the features and dataset.
+    *
+    * Default 0.01.
     */
-  def setStepSize(step: Double): this.type = {
-    require(step > 0,
-      s"Initial step size must be positive but got ${step}")
-    this.stepSize = step
+  def setAlpha(alpha: Double): this.type = {
+    this.alpha = alpha
     this
   }
 
   /**
-    * Set the number of iterations for parallel SGD. Default 100.
+    * Set the hyper parameter beta of learning rate.
+    * According to the reference, the optimal value of beta is usually around 1. Default 1.0.
+    */
+  def setBeta(beta: Double): this.type = {
+    this.beta = beta
+    this
+  }
+
+  /**
+    * Set the L1 regularization parameter lambda1. Default 0.1.
+    */
+  def setLambda1(lambda1: Double): this.type = {
+    this.lambda1 = lambda1
+    this
+  }
+
+  /**
+    * Set the L2 regularization paramter lambda2. Default 1.0.
+    */
+  def setLambda2(lambda2: Double): this.type = {
+    this.lambda2 = lambda2
+    this
+  }
+
+  /**
+    * Set the number of iterations for parallel Ftrl. Default 1.
     */
   def setNumIterations(iters: Int): this.type = {
     require(iters >= 0,
       s"Number of iterations must be nonnegative but got ${iters}")
     this.numIterations = iters
-    this
-  }
-
-  /**
-    * Set the regularization parameter. Default 0.0.
-    */
-  def setRegParam(regParam: Double): this.type = {
-    require(regParam >= 0,
-      s"Regularization parameter must be nonnegative but got ${regParam}")
-    this.regParam = regParam
     this
   }
 
@@ -92,13 +120,12 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
     * this param could be adjusted to a larger size.
     */
   def setAggregationDepth(aggregationDepth: Int): this.type = {
-    require(aggregationDepth > 0, s"Aggregation depth must be positive but got $aggregationDepth")
     this.aggregationDepth = aggregationDepth
     this
   }
 
   /**
-    * Set the number of partitions for parallel SGD.
+    * Set the number of partitions for parallel Ftrl.
     */
   def setNumPartitions(numPartitions: Int): this.type = {
     this.numPartitions = numPartitions
@@ -107,33 +134,34 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
 
   /**
     * Set the gradient function (of the loss function of one single data example)
-    * to be used for parallel SGD.
+    * to be used for parallel Ftrl.
     */
   def setGradient(gradient: Gradient): this.type = {
     this.gradient = gradient
     this
   }
 
-
   /**
     * Set the updater function to actually perform a gradient step in a given direction.
     * The updater is responsible to perform the update from the regularization term as well,
     * and therefore determines what kind or regularization is used, if any.
     */
-  def setUpdater(updater: Updater): this.type = {
+  def setUpdater(updater: PerCoordinateUpdater): this.type = {
     this.updater = updater
     this
   }
 
   override def optimize(data: RDD[(Double, Vector)], initialWeights: Vector): Vector = {
-    val (weights, _) = ParallelGradientDescent.runParallelSGD(
+    val (weights, _) = ParallelFtrl.runParallelFtrl(
       data,
       gradient,
       updater,
-      stepSize,
-      numIterations,
-      regParam,
+      alpha,
+      beta,
+      lambda1,
+      lambda2,
       initialWeights,
+      numIterations,
       convergenceTol,
       aggregationDepth,
       numPartitions)
@@ -141,15 +169,17 @@ class ParallelGradientDescent private[spark](private var gradient: Gradient, pri
   }
 }
 
-object ParallelGradientDescent extends Logging {
-  def runParallelSGD(
+object ParallelFtrl extends Logging {
+  def runParallelFtrl(
       data: RDD[(Double, Vector)],
       gradient: Gradient,
-      updater: Updater,
-      stepSize: Double,
-      numIterations: Int,
-      regParam: Double,
+      updater: PerCoordinateUpdater,
+      alpha: Double,
+      beta: Double,
+      lambda1: Double,
+      lambda2: Double,
       initialWeights: Vector,
+      numIterations: Int,
       convergenceTol: Double,
       aggregationDepth: Int,
       numPartitions: Int): (Vector, Array[Double]) = {
@@ -164,7 +194,7 @@ object ParallelGradientDescent extends Logging {
 
     // if no data, return initial weights to avoid NaNs
     if (numExamples == 0) {
-      logWarning("ParallelGradientDescent.runParallelMiniBatchSGD returning initial weights, no data found")
+      logWarning("Ftrl.runParallelFtrl returning initial weights, no data found")
       return (initialWeights, stochasticLossHistory.toArray)
     }
 
@@ -182,13 +212,18 @@ object ParallelGradientDescent extends Logging {
           var localWeights = bcWeights.value
           var localRegVal = 0.0
           var localLossSum = 0.0
+          var n = Vectors.zeros(localWeights.size)
+          var z = Vectors.zeros(localWeights.size)
           var j = 1
           while (part.hasNext) {
-            val (label, vector) = part.next()
-            val (localGrad, localLoss) = gradient.compute(vector, label, localWeights)
-            val update = updater.compute(localWeights, localGrad, stepSize, j, regParam)
+            val (label, features) = part.next()
+            val activeIndices = features.toSparse.indices
+            val (localGrad, localLoss) = gradient.compute(features, label, localWeights)
+            val update = updater.compute(activeIndices, localWeights, localGrad, alpha, beta, lambda1, lambda2, n, z)
             localWeights = update._1
             localRegVal = update._2
+            n = update._3
+            z = update._4
             localLossSum += localLoss
             j += 1
           }
@@ -208,7 +243,7 @@ object ParallelGradientDescent extends Logging {
       i += 1
     }
 
-    logInfo("ParallelGradientDescent.runParallelSGD finished. Last 10 stochastic losses %s".format(
+    logInfo("ParallelFtrl.runParallelFtrl finished. Last 10 stochastic losses %s".format(
       stochasticLossHistory.takeRight(10).mkString(", ")))
 
     (weights, stochasticLossHistory.toArray)
