@@ -645,7 +645,7 @@ class FactorizationMachinesPerCoordinateUpdater(
     val gradBias = gradient(gradient.size - 1)
     val sigmaBias = (math.sqrt(nArray(nArray.length - 1) + gradBias * gradBias) -
       math.sqrt(nArray(nArray.length - 1))) / alphaW
-    zArray(zArray.length - 1) += gradBias - sigmaBias * 1.0
+    zArray(zArray.length - 1) += gradBias - sigmaBias * weightsNew(weightsNew.length - 1)
     nArray(nArray.length - 1) += gradBias * gradBias
 
     activeIndices.foreach { index =>
