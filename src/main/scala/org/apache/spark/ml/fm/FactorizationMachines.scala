@@ -624,7 +624,12 @@ class FactorizationMachinesUpdater(
       }
     }
 
-    (Vectors.dense(weightsNew), 0.0)
+    val brzRegParams = BDV.vertcat(BDV.fill(numFeatures * dim._3){regParams._3},
+      BDV.fill(numFeatures){regParams._2}, BDV.fill(1){regParams._1})
+    val brzWeights: BV[Double] = MLlibVectors.dense(weightsNew).asBreeze
+    val regVal = brzRegParams dot (brzWeights :* brzWeights)
+
+    (Vectors.dense(weightsNew), regVal)
   }
 }
 
@@ -709,7 +714,7 @@ class FactorizationMachinesPerCoordinateUpdater(
       BDV.fill(numFeatures){regParamsL1._2}, BDV.fill(1){regParamsL1._1})
     val brzRegParamsL2 = BDV.vertcat(BDV.fill(numFeatures * dim._3){regParamsL2._3},
       BDV.fill(numFeatures){regParamsL2._2}, BDV.fill(1){regParamsL2._1})
-    val brzWeights: BV[Double] = MLlibVectors.dense(weightsNew).asBreeze.toDenseVector
+    val brzWeights: BV[Double] = MLlibVectors.dense(weightsNew).asBreeze
     val regVal = (brzRegParamsL1 dot abs(brzWeights)) + (brzRegParamsL2 dot (brzWeights :* brzWeights))
 
     (MLlibVectors.dense(weightsNew), regVal, MLlibVectors.dense(nArray), MLlibVectors.dense(zArray))
