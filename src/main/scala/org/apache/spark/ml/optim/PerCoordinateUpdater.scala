@@ -27,7 +27,6 @@ import org.apache.spark.mllib.linalg.Vector
   */
 abstract class PerCoordinateUpdater extends Serializable {
   def compute(
-      activeIndices: Array[Int],
       weightsOld: Vector,
       gradient: Vector,
       alpha: Double,

@@ -19,7 +19,7 @@ package org.apache.spark.ml.optim
 
 import breeze.linalg.norm
 import org.apache.spark.internal.Logging
-import org.apache.spark.mllib.linalg.{Vector, Vectors}
+import org.apache.spark.mllib.linalg.{BLAS, Vector, Vectors}
 import org.apache.spark.mllib.optimization.{Gradient, Optimizer}
 import org.apache.spark.rdd.RDD
 
@@ -207,34 +207,31 @@ object ParallelFtrl extends Logging {
     var i = 1
     while (!converged && i <= numIterations) {
       val bcWeights = data.context.broadcast(weights)
-      val (avgWeights, avgRegVal, lossSum, batchSize) = data.repartition(numParts)
+      val (sumWeights, sumRegVal, lossSum) = data.repartition(numParts)
         .mapPartitions { part =>
           var localWeights = bcWeights.value
           var localRegVal = 0.0
           var localLossSum = 0.0
           var n = Vectors.zeros(localWeights.size)
           var z = Vectors.zeros(localWeights.size)
-          var j = 1
           while (part.hasNext) {
             val (label, features) = part.next()
-            val activeIndices = features.toSparse.indices
             val (localGrad, localLoss) = gradient.compute(features, label, localWeights)
-            val update = updater.compute(activeIndices, localWeights, localGrad, alpha, beta, lambda1, lambda2, n, z)
+            val update = updater.compute(localWeights, localGrad, alpha, beta, lambda1, lambda2, n, z)
             localWeights = update._1
             localRegVal = update._2
             n = update._3
             z = update._4
             localLossSum += localLoss
-            j += 1
           }
-          Iterator.single((localWeights, localRegVal, localLossSum, j))
-        }.treeReduce ({ case ((w1, rv1, ls1, c1), (w2, rv2, ls2, c2)) =>
-        val avgWeights =
-          (w1.asBreeze * c1.toDouble + w2.asBreeze * c2.toDouble) / (c1 + c2).toDouble
-        val avgRegVal = (rv1 * c1.toDouble + rv2 * c2.toDouble) / (c1 + c2).toDouble
-        (Vectors.fromBreeze(avgWeights), avgRegVal, ls1 + ls2, c1 + c2)}, aggregationDepth)
-      stochasticLossHistory.append(lossSum / batchSize + avgRegVal)
-      weights = avgWeights
+          Iterator.single((localWeights, localRegVal, localLossSum))
+        }.treeReduce ({ case ((w1, rv1, ls1), (w2, rv2, ls2)) =>
+          val sumWeights = w1.asBreeze + w2.asBreeze
+          val sumRegVal = rv1 + rv2
+          (Vectors.fromBreeze(sumWeights), sumRegVal, ls1 + ls2)}, aggregationDepth)
+      stochasticLossHistory.append(lossSum / numParts + sumRegVal)
+      BLAS.scal(1.0 / numParts, sumWeights)
+      weights = sumWeights
       previousWeights = currentWeights
       currentWeights = Some(weights)
       if (previousWeights.isDefined && currentWeights.isDefined) {
@@ -263,3 +260,4 @@ object ParallelFtrl extends Logging {
     solutionVecDiff < convergenceTol * Math.max(norm(currentBDV), 1.0)
   }
 }
+
