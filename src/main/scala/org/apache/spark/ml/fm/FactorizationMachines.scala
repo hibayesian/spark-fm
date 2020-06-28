@@ -17,7 +17,7 @@
 
 package org.apache.spark.ml.fm
 
-import breeze.linalg.{DenseVector => BDV, Vector => BV, axpy => brzAxpy}
+import breeze.linalg.{DenseVector => BDV, Vector => BV}
 import breeze.numerics.abs
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.optim.configuration.Algo.Algo
@@ -29,8 +29,9 @@ import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util.{DefaultParamsWritable, Identifiable}
 import org.apache.spark.ml.{PredictionModel, Predictor, PredictorParams}
 import org.apache.spark.mllib.linalg.VectorImplicits._
-import org.apache.spark.mllib.linalg.{DenseVector, Vector => MLlibVector, Vectors => MLlibVectors}
+import org.apache.spark.mllib.linalg.{Vector => MLlibVector, Vectors => MLlibVectors}
 import org.apache.spark.mllib.optimization.{Gradient, GradientDescent, LBFGS, Updater}
+import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.storage.StorageLevel
@@ -583,7 +584,7 @@ class FactorizationMachinesGradient(
 
     algo match {
       case Algo.Regression => (p - label) * (p - label)
-      case Algo.BinaryClassification => -Math.log(1 + 1 / (1 + Math.exp(-p * label)))
+      case Algo.BinaryClassification =>  MLUtils.log1pExp(-p * label)
       case _ => throw new IllegalArgumentException(s"Factorization machines do not support $algo now")
     }
   }
@@ -601,7 +602,7 @@ class FactorizationMachinesUpdater(
       iter: Int,
       regParam: Double): (MLlibVector, Double) = {
 
-    val weightsNew = weightsOld.toArray
+    val weightsNew = weightsOld.copy.toArray
     val size = weightsOld.size
     val thisIterStepSize = stepSize / math.sqrt(iter)
     val wRange = Range(numFeatures * dim._3, numFeatures * dim._3 + numFeatures)
@@ -652,7 +653,7 @@ class FactorizationMachinesPerCoordinateUpdater(
 
     val (alphaBias, alphaW, alphaV) = (alphaBWV._1, alphaBWV._2, alphaBWV._3)
     val (betaBias, betaW, betaV) = (betaBWV._1, betaBWV._2, betaBWV._3)
-    val weightsNew = weightsOld.toArray
+    val weightsNew = weightsOld.copy.toArray
     val activeIndices = gradient.toSparse.indices
     val nArray = n.toDense.values
     val zArray = z.toDense.values
